@@ -30,6 +30,7 @@ def input_handler():
     headers = {"User-Agent": "Mozilla/5.0"}
 
     films = []
+    posters = []
     try:
         resp = requests.get(search_url, headers=headers, timeout=10)
         resp.raise_for_status()
@@ -37,27 +38,34 @@ def input_handler():
 
         for item in soup.select("ul.items.with_spacer li.item"):
             a_tag = item.select_one(".title a")
+            poster_img = item.select_one(".poster img")
+
             if not a_tag:
                 continue
+
             title = a_tag.get_text(strip=True)
+            poster = urljoin(domain, poster_img['src']) if poster_img and poster_img.has_attr('src') else "https://via.placeholder.com/160x240"
+
             films.append(title)
+            posters.append(poster)
     except Exception as e:
         logger.error(f"Ошибка при поиске: {e}")
 
     # Формируем ответ
     response = {
         "type": "list",
-        "headline": "Template",
+        "headline": input_text,   # <-- Template={INPUT}
         "template": {
             "type": "separate",
             "layout": "0,0,2,4",
             "color": "msx-glass",
             "icon": "msx-white-soft:movie",
             "iconSize": "medium",
-            "title": input_text,          # здесь Template={INPUT}
-            "titleFooter": "Title Footer"
+            "title": input_text,       # заголовок карточки = input
+            "image": posters[0] if posters else "https://via.placeholder.com/160x240"  # <-- вместо titleFooter
         },
-        "items": [{"title": f} for f in films] or [{"title": "Ничего не найдено"}]
+        "items": [{"title": films[i], "image": posters[i]} for i in range(len(films))] \
+                 or [{"title": "Ничего не найдено", "image": "https://via.placeholder.com/160x240"}]
     }
     return jsonify(response)
 
