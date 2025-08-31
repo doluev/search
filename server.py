@@ -23,7 +23,7 @@ def get_domain():
 @app.route("/input", methods=["GET", "POST"])
 def input_handler():
     global search_cache
-    search_cache.clear()  # очищаем кэш при каждом новом поиске
+    search_cache.clear()
 
     input_text = request.args.get("input", "") or request.form.get("input", "")
     logger.info(f"[INPUT] Получен ввод: {input_text}")
@@ -56,35 +56,53 @@ def input_handler():
             poster = urljoin(domain, poster_img["src"]) if poster_img and poster_img.has_attr("src") else "https://via.placeholder.com/160x240"
             year = year_el.get_text(strip=True) if year_el else ""
             quality = quality_el.get_text(strip=True) if quality_el else ""
-            rating = rating_el.get_text(strip=True) if rating_el else ""
+            rating = rating_el.get_text(strip=True) if rating_el else "0"
+
+            try:
+                rating_val = float(rating.replace(",", "."))
+            except:
+                rating_val = 0.0
 
             footer_parts = [p for p in [year, quality, rating] if p]
             footer = ", ".join(footer_parts)
 
-            # сохраняем в кэш
             search_cache[idx] = link
 
             films.append({
+                "id": idx,
                 "title": title,
                 "image": poster,
                 "titleFooter": footer,
-                "action": f"panel:https://search-zlbh.onrender.com/search/{idx}.json"   # теперь ссылка на наш сервер
+                "rating_val": rating_val
             })
     except Exception as e:
         logger.error(f"Ошибка при поиске: {e}")
 
+    # сортировка по убыванию рейтинга
+    films_sorted = sorted(films, key=lambda x: x["rating_val"], reverse=True)
+
+    # готовим JSON
+    items = []
+    for f in films_sorted:
+        items.append({
+            "title": f["title"],
+            "image": f["image"],
+            "titleFooter": f["titleFooter"],
+            "action": f"panel:/search/{f['id']}.json"
+        })
+
     response = {
         "type": "list",
-        "headline": input_text,   # заголовок = ввод
+        "headline": input_text,
         "template": {
             "type": "separate",
             "layout": "0,0,2,4",
             "color": "msx-glass",
             "iconSize": "medium",
             "title": input_text,
-            "image": films[0]["image"] if films else "https://via.placeholder.com/160x240"
+            "image": items[0]["image"] if items else "https://via.placeholder.com/160x240"
         },
-        "items": films or [{
+        "items": items or [{
             "title": "Ничего не найдено",
             "image": "https://via.placeholder.com/160x240",
             "titleFooter": "",
@@ -118,6 +136,24 @@ def search_film_details(item_id):
     alt_title_el = soup.select_one('.info_item .value[itemprop="alternativeHeadline"]')
     alt_title = alt_title_el.get_text(strip=True) if alt_title_el else title
 
+    # --- страна ---
+    country = ""
+    for info in soup.select("div.info_item"):
+        key = info.select_one(".key")
+        val = info.select_one(".value")
+        if not key or not val:
+            continue
+        key_text = key.get_text(strip=True).lower()
+        if key_text == "страна":
+            country = val.get_text(strip=True)
+        elif key_text == "год":
+            year = val.get_text(strip=True)
+        elif key_text == "жанр":
+            genres = [g.get_text(strip=True) for g in val.select('[itemprop="genre"]')]
+
+    # если год не найден в блоке, fallback
+    year = locals().get("year", "")
+
     # --- постер ---
     poster = soup.select_one(".poster img")
     poster = urljoin(link, poster["src"]) if poster and poster.has_attr("src") else "https://via.placeholder.com/160x240"
@@ -130,25 +166,13 @@ def search_film_details(item_id):
     description = soup.select_one('div.body[itemprop="description"]')
     description = description.get_text(strip=True) if description else "Описание отсутствует"
 
-    # --- жанры ---
-    genre_block = soup.find("div", class_="info_item", string=lambda t: t and "Жанр" in t)
-    genres = []
-    if genre_block:
-        value = genre_block.find_next("div", class_="value")
-        if value:
-            genres = [g.get_text(strip=True) for g in value.select('[itemprop="genre"]')]
-
-    # --- год ---
-    year_el = soup.select_one(".year")
-    year = year_el.get_text(strip=True) if year_el else ""
-
     # JSON в формате pages
     response = {
         "type": "pages",
         "headline": title,
         "pages": [
             {
-                "headline": alt_title,   # оригинальное название
+                "headline": ", ".join([x for x in [alt_title, country, year] if x]),  # orig + страна + год
                 "items": [
                     {
                         "type": "default",
@@ -160,7 +184,7 @@ def search_film_details(item_id):
                         "titleFooter": f"{year}",
                         "image": poster,
                         "imageFiller": "cover",
-                        "imageWidth": 4   # заменил 2 → 4
+                        "imageWidth": 4
                     }
                 ]
             }
