@@ -10,8 +10,8 @@ from playwright.sync_api import sync_playwright
 import re
 import os
 
-# Устанавливаем переменные окружения для Playwright
-os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/ms-playwright'
+# Railway автоматически предоставляет PORT
+PORT = int(os.environ.get("PORT", 5000))
 
 app = Flask(__name__)
 
@@ -65,17 +65,14 @@ def scrape_movie(url, movie_id):
     title = "Фильм"
 
     try:
-        with sync_playwright() as p:
-            # Настройки для работы в Docker/Render
+            # Настройки для Railway
             browser = p.chromium.launch(
                 headless=True,
                 args=[
-                    '--no-sandbox',
+                    '--no-sandbox', 
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
-                    '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor',
-                    '--disable-extensions'
+                    '--disable-web-security'
                 ]
             )
             page = browser.new_page()
@@ -204,7 +201,7 @@ def input_handler():
             "title": f["title"],
             "image": f["image"],
             "titleFooter": f["titleFooter"],
-            "action": f"panel:https://search-zlbh.onrender.com/search/{f['id']}.json"
+            "action": f"panel:https://your-app-name.up.railway.app/search/{f['id']}.json"
         })
 
     response = {
@@ -222,7 +219,7 @@ def input_handler():
             "title": "Ничего не найдено",
             "image": "https://via.placeholder.com/160x240",
             "titleFooter": "",
-            "action": "panel:https://search-zlbh.onrender.com/search/0.json"
+            "action": "panel:https://your-app-name.up.railway.app/search/0.json"
         }]
     }
     return jsonify(response)
@@ -306,7 +303,7 @@ def search_film_details(item_id):
                         "image": poster,
                         "imageFiller": "cover",
                         "imageWidth": 4,
-                        "action": f"panel:https://search-zlbh.onrender.com/video.json?id={item_id}"
+                        "action": f"panel:https://your-app-name.up.railway.app/video.json?id={item_id}"
                     }
                 ]
             }
@@ -375,13 +372,25 @@ def scrape_movie_async(url, movie_id):
     m3u8_requests = []
     title = "Фильм"
 
+def scrape_movie_async(url, movie_id):
+    """Асинхронный парсинг фильма"""
+    logger.info(f"[ASYNC-PARSING] Начат парсинг фильма {movie_id}: {url}")
+    parsing_cache[movie_id] = {"status": "parsing", "data": None}
+    
+    m3u8_requests = []
+    title = "Фильм"
+
     try:
         with sync_playwright() as p:
-            # Для production (Docker) используем headless=True
-            # Для локальной разработки можно поставить headless=False
+            # Настройки для Railway
             browser = p.chromium.launch(
                 headless=True,
-                args=['--no-sandbox', '--disable-dev-shm-usage']
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-web-security'
+                ]
             )
             page = browser.new_page()
 
@@ -431,7 +440,46 @@ def scrape_movie_async(url, movie_id):
             
     except Exception as e:
         logger.error(f"[ASYNC-PARSING] Ошибка парсинга {movie_id}: {e}")
-        parsing_cache[movie_id] = {"status": "failed", "data": None}
+        # В случае ошибки Playwright, пробуем простой requests (fallback)
+        try:
+            logger.info(f"[FALLBACK] Пробуем простой requests для {movie_id}")
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            
+            # Ищем m3u8 ссылки в HTML
+            m3u8_pattern = r'https?://[^\s"\'<>]+\.m3u8'
+            found_links = re.findall(m3u8_pattern, resp.text)
+            
+            if found_links:
+                parsing_cache[movie_id] = {
+                    "status": "completed",
+                    "data": {
+                        "title": "Фильм (Fallback)",
+                        "links": list(dict.fromkeys(found_links))
+                    }
+                }
+                logger.info(f"[FALLBACK] Найдено {len(found_links)} ссылок через fallback")
+            else:
+                parsing_cache[movie_id] = {"status": "failed", "data": None}
+                
+        except Exception as fallback_error:
+            logger.error(f"[FALLBACK] Ошибка fallback парсинга {movie_id}: {fallback_error}")
+            parsing_cache[movie_id] = {"status": "failed", "data": None}
+
+# --- /debug: проверка Playwright ---
+@app.route("/debug")
+def debug_playwright():
+    try:
+        with sync_playwright() as p:
+            browser_info = {
+                "chromium_executable": p.chromium.executable_path,
+                "version": p.chromium.version,
+                "browsers_path": os.environ.get('PLAYWRIGHT_BROWSERS_PATH', 'не установлена')
+            }
+            return jsonify(browser_info)
+    except Exception as e:
+        return jsonify({"error": str(e), "playwright_available": False})
 
 @app.after_request
 def after_request(response):
@@ -441,6 +489,4 @@ def after_request(response):
     return response
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)
