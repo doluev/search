@@ -38,7 +38,8 @@ def input_handler():
             a_tag = item.select_one(".title a")
             poster_img = item.select_one(".poster img")
             year_el = item.select_one(".year")
-            quality_el = item.select_one(".quality, .q")  # иногда класс меняется
+            quality_el = item.select_one(".quality, .q")
+            rating_el = item.select_one(".rating")
 
             if not a_tag:
                 continue
@@ -47,11 +48,16 @@ def input_handler():
             poster = urljoin(domain, poster_img["src"]) if poster_img and poster_img.has_attr("src") else "https://via.placeholder.com/160x240"
             year = year_el.get_text(strip=True) if year_el else ""
             quality = quality_el.get_text(strip=True) if quality_el else ""
+            rating = rating_el.get_text(strip=True) if rating_el else ""
+
+            footer_parts = [p for p in [year, quality, rating] if p]
+            footer = ", ".join(footer_parts)
 
             films.append({
                 "title": title,
                 "image": poster,
-                "titleFooter": f"{year}, {quality}" if year or quality else ""
+                "titleFooter": footer,
+                "action": "panel:http://msx.benzac.de/info/data/guide/panel.json"
             })
     except Exception as e:
         logger.error(f"Ошибка при поиске: {e}")
@@ -71,7 +77,8 @@ def input_handler():
         "items": films or [{
             "title": "Ничего не найдено",
             "image": "https://via.placeholder.com/160x240",
-            "titleFooter": ""
+            "titleFooter": "",
+            "action": "panel:http://msx.benzac.de/info/data/guide/panel.json"
         }]
     }
     return jsonify(response)
