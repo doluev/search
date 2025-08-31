@@ -131,8 +131,12 @@ def search_film_details(item_id):
     description = description.get_text(strip=True) if description else "Описание отсутствует"
 
     # --- жанры ---
-    genres = soup.select(".genres a")
-    genres = [g.get_text(strip=True) for g in genres] if genres else []
+    genre_block = soup.find("div", class_="info_item", string=lambda t: t and "Жанр" in t)
+    genres = []
+    if genre_block:
+        value = genre_block.find_next("div", class_="value")
+        if value:
+            genres = [g.get_text(strip=True) for g in value.select('[itemprop="genre"]')]
 
     # --- год ---
     year_el = soup.select_one(".year")
@@ -144,7 +148,7 @@ def search_film_details(item_id):
         "headline": title,
         "pages": [
             {
-                "headline": alt_title,   # <-- теперь оригинальное название
+                "headline": alt_title,   # оригинальное название
                 "items": [
                     {
                         "type": "default",
@@ -156,7 +160,7 @@ def search_film_details(item_id):
                         "titleFooter": f"{year}",
                         "image": poster,
                         "imageFiller": "cover",
-                        "imageWidth": 2
+                        "imageWidth": 4   # заменил 2 → 4
                     }
                 ]
             }
