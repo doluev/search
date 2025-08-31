@@ -185,6 +185,7 @@ def search_film_details(item_id):
                         "image": poster,
                         "imageFiller": "cover",
                         "imageWidth": 4
+                        "action": "video:http://msx.benzac.de/media/video1.mp4"
                     }
                 ]
             }
