@@ -148,7 +148,7 @@ def search_film_details(item_id):
                         "titleFooter": f"{year}",
                         "image": poster,
                         "imageFiller": "cover",
-                        "imageWidth": 2
+                        "imageWidth": 4
                     }
                 ]
             }
