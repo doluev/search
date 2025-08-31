@@ -102,6 +102,7 @@ def film_details():
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
+    # --- данные со страницы ---
     title = soup.select_one("h1")
     title = title.get_text(strip=True) if title else "Без названия"
 
@@ -117,23 +118,32 @@ def film_details():
     genres = soup.select(".genres a")
     genres = [g.get_text(strip=True) for g in genres] if genres else []
 
-    # Формируем JSON для MSX панели
+    year_el = soup.select_one(".year")
+    year = year_el.get_text(strip=True) if year_el else ""
+
+    # --- Формируем JSON в формате pages ---
     response = {
-        "type": "list",
+        "type": "pages",
         "headline": title,
-        "template": {
-            "type": "separate",
-            "layout": "0,0,2,4",
-            "color": "msx-glass",
-            "icon": "msx-white-soft:movie",
-            "iconSize": "medium",
-            "title": title,
-            "image": poster
-        },
-        "items": [
-            {"title": f"Рейтинг: {rating}"},
-            {"title": f"Жанры: {', '.join(genres) if genres else 'Не указаны'}"},
-            {"title": description}
+        "pages": [
+            {
+                "headline": "Информация",
+                "items": [
+                    {
+                        "type": "default",
+                        "layout": "0,0,8,6",
+                        "headline": title,                    # Название фильма
+                        "text": description,                   # Описание
+                        "icon": "msx-white-soft:apps",
+                        "titleHeader": f"Жанры: {', '.join(genres) if genres else 'не указаны'}",
+                        "title": f"Рейтинг: {rating}",
+                        "titleFooter": f"{year}",              # Год выпуска
+                        "image": poster,
+                        "imageFiller": "cover",
+                        "imageWidth": 2
+                    }
+                ]
+            }
         ]
     }
     return jsonify(response)
