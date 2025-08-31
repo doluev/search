@@ -3,7 +3,7 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 app = Flask(__name__)
 
@@ -16,6 +16,7 @@ def get_domain():
     date_str = today.strftime("%d%m%y")
     return f"https://kinovod{date_str}.pro"
 
+# --- /input: поиск фильмов ---
 @app.route("/input", methods=["GET", "POST"])
 def input_handler():
     input_text = request.args.get("input", "") or request.form.get("input", "")
@@ -45,6 +46,7 @@ def input_handler():
                 continue
 
             title = a_tag.get_text(strip=True)
+            link = urljoin(domain, a_tag["href"])
             poster = urljoin(domain, poster_img["src"]) if poster_img and poster_img.has_attr("src") else "https://via.placeholder.com/160x240"
             year = year_el.get_text(strip=True) if year_el else ""
             quality = quality_el.get_text(strip=True) if quality_el else ""
@@ -57,7 +59,7 @@ def input_handler():
                 "title": title,
                 "image": poster,
                 "titleFooter": footer,
-                "action": "panel:http://msx.benzac.de/info/data/guide/panel.json"
+                "action": f"panel:/film?link={quote(link)}"
             })
     except Exception as e:
         logger.error(f"Ошибка при поиске: {e}")
@@ -78,8 +80,61 @@ def input_handler():
             "title": "Ничего не найдено",
             "image": "https://via.placeholder.com/160x240",
             "titleFooter": "",
-            "action": "panel:http://msx.benzac.de/info/data/guide/panel.json"
+            "action": "panel:/film?link="
         }]
+    }
+    return jsonify(response)
+
+# --- /film: детали фильма ---
+@app.route("/film")
+def film_details():
+    link = request.args.get("link", "")
+    if not link:
+        return jsonify({"error": "Нет ссылки"}), 400
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get(link, headers=headers, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.error(f"Ошибка загрузки страницы {link}: {e}")
+        return jsonify({"error": "Не удалось получить страницу"}), 500
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    title = soup.select_one("h1")
+    title = title.get_text(strip=True) if title else "Без названия"
+
+    poster = soup.select_one(".poster img")
+    poster = urljoin(link, poster["src"]) if poster and poster.has_attr("src") else "https://via.placeholder.com/160x240"
+
+    rating = soup.select_one(".rating")
+    rating = rating.get_text(strip=True) if rating else "0"
+
+    description = soup.select_one('div.body[itemprop="description"]')
+    description = description.get_text(strip=True) if description else "Описание отсутствует"
+
+    genres = soup.select(".genres a")
+    genres = [g.get_text(strip=True) for g in genres] if genres else []
+
+    # Формируем JSON для MSX панели
+    response = {
+        "type": "list",
+        "headline": title,
+        "template": {
+            "type": "separate",
+            "layout": "0,0,2,4",
+            "color": "msx-glass",
+            "icon": "msx-white-soft:movie",
+            "iconSize": "medium",
+            "title": title,
+            "image": poster
+        },
+        "items": [
+            {"title": f"Рейтинг: {rating}"},
+            {"title": f"Жанры: {', '.join(genres) if genres else 'Не указаны'}"},
+            {"title": description}
+        ]
     }
     return jsonify(response)
 
