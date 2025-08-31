@@ -110,21 +110,31 @@ def search_film_details(item_id):
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
+    # --- название ---
     title = soup.select_one("h1")
     title = title.get_text(strip=True) if title else "Без названия"
 
+    # --- оригинальное название ---
+    alt_title_el = soup.select_one('.info_item .value[itemprop="alternativeHeadline"]')
+    alt_title = alt_title_el.get_text(strip=True) if alt_title_el else title
+
+    # --- постер ---
     poster = soup.select_one(".poster img")
     poster = urljoin(link, poster["src"]) if poster and poster.has_attr("src") else "https://via.placeholder.com/160x240"
 
+    # --- рейтинг ---
     rating = soup.select_one(".rating")
     rating = rating.get_text(strip=True) if rating else "0"
 
+    # --- описание ---
     description = soup.select_one('div.body[itemprop="description"]')
     description = description.get_text(strip=True) if description else "Описание отсутствует"
 
+    # --- жанры ---
     genres = soup.select(".genres a")
     genres = [g.get_text(strip=True) for g in genres] if genres else []
 
+    # --- год ---
     year_el = soup.select_one(".year")
     year = year_el.get_text(strip=True) if year_el else ""
 
@@ -134,7 +144,7 @@ def search_film_details(item_id):
         "headline": title,
         "pages": [
             {
-                "headline": "Информация",
+                "headline": alt_title,   # <-- теперь оригинальное название
                 "items": [
                     {
                         "type": "default",
@@ -145,7 +155,8 @@ def search_film_details(item_id):
                         "title": f"Рейтинг: {rating}",
                         "titleFooter": f"{year}",
                         "image": poster,
-                        "imageWidth": 4
+                        "imageFiller": "cover",
+                        "imageWidth": 2
                     }
                 ]
             }
