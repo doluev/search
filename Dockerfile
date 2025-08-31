@@ -1,11 +1,24 @@
 # Базовый образ с Python
 FROM python:3.12-slim
 
-# Обновляем apt и ставим зависимости для Chromium
+# Устанавливаем системные зависимости для Chromium
 RUN apt-get update && apt-get install -y \
-    libnss3 libatk1.0-0 libcups2 libxcomposite1 libxrandr2 libxdamage1 \
-    libxkbcommon0 libgbm-dev wget curl unzip && \
-    rm -rf /var/lib/apt/lists/*
+    wget \
+    gnupg \
+    ca-certificates \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libxss1 \
+    libasound2 \
+    libxshmfence1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Рабочая папка
 WORKDIR /app
@@ -14,11 +27,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Устанавливаем Playwright и Chromium
-RUN pip install --no-cache-dir playwright && playwright install --with-deps chromium
+# Устанавливаем Playwright и браузеры
+RUN pip install --no-cache-dir playwright
+RUN playwright install chromium
+RUN playwright install-deps chromium
 
 # Копируем весь код проекта
 COPY . .
+
+# Устанавливаем переменные окружения для Playwright
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Открываем порт для Render
 EXPOSE 5000
