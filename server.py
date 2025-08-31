@@ -3,13 +3,16 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin
 
 app = Flask(__name__)
 
 # Логирование
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Кэш поиска (id -> ссылка на фильм)
+search_cache = {}
 
 def get_domain():
     today = datetime.today()
@@ -19,6 +22,9 @@ def get_domain():
 # --- /input: поиск фильмов ---
 @app.route("/input", methods=["GET", "POST"])
 def input_handler():
+    global search_cache
+    search_cache.clear()  # очищаем кэш при каждом новом поиске
+
     input_text = request.args.get("input", "") or request.form.get("input", "")
     logger.info(f"[INPUT] Получен ввод: {input_text}")
 
@@ -35,7 +41,7 @@ def input_handler():
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        for item in soup.select("ul.items.with_spacer li.item"):
+        for idx, item in enumerate(soup.select("ul.items.with_spacer li.item"), start=1):
             a_tag = item.select_one(".title a")
             poster_img = item.select_one(".poster img")
             year_el = item.select_one(".year")
@@ -55,11 +61,14 @@ def input_handler():
             footer_parts = [p for p in [year, quality, rating] if p]
             footer = ", ".join(footer_parts)
 
+            # сохраняем в кэш
+            search_cache[idx] = link
+
             films.append({
                 "title": title,
                 "image": poster,
                 "titleFooter": footer,
-                "action": f"panel:/film?link={quote(link)}"
+                "action": f"panel:/search/{idx}.json"   # теперь ссылка на наш сервер
             })
     except Exception as e:
         logger.error(f"Ошибка при поиске: {e}")
@@ -80,29 +89,28 @@ def input_handler():
             "title": "Ничего не найдено",
             "image": "https://via.placeholder.com/160x240",
             "titleFooter": "",
-            "action": "panel:/film?link="
+            "action": "panel:/search/0.json"
         }]
     }
     return jsonify(response)
 
-# --- /film: детали фильма ---
-@app.route("/film")
-def film_details():
-    link = request.args.get("link", "")
+# --- /search/<id>.json: данные о фильме ---
+@app.route("/search/<int:item_id>.json")
+def search_film_details(item_id):
+    link = search_cache.get(item_id)
     if not link:
-        return jsonify({"error": "Нет ссылки"}), 400
+        return jsonify({"error": "Фильм не найден"}), 404
 
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         resp = requests.get(link, headers=headers, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        logger.error(f"Ошибка загрузки страницы {link}: {e}")
-        return jsonify({"error": "Не удалось получить страницу"}), 500
+        logger.error(f"Ошибка загрузки {link}: {e}")
+        return jsonify({"error": "Не удалось загрузить страницу"}), 500
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # --- данные со страницы ---
     title = soup.select_one("h1")
     title = title.get_text(strip=True) if title else "Без названия"
 
@@ -121,7 +129,7 @@ def film_details():
     year_el = soup.select_one(".year")
     year = year_el.get_text(strip=True) if year_el else ""
 
-    # --- Формируем JSON в формате pages ---
+    # JSON в формате pages
     response = {
         "type": "pages",
         "headline": title,
@@ -132,12 +140,12 @@ def film_details():
                     {
                         "type": "default",
                         "layout": "0,0,8,6",
-                        "headline": title,                    # Название фильма
-                        "text": description,                   # Описание
+                        "headline": title,
+                        "text": description,
                         "icon": "msx-white-soft:apps",
                         "titleHeader": f"Жанры: {', '.join(genres) if genres else 'не указаны'}",
                         "title": f"Рейтинг: {rating}",
-                        "titleFooter": f"{year}",              # Год выпуска
+                        "titleFooter": f"{year}",
                         "image": poster,
                         "imageFiller": "cover",
                         "imageWidth": 2
