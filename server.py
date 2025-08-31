@@ -106,7 +106,7 @@ def input_handler():
             "title": "Ничего не найдено",
             "image": "https://via.placeholder.com/160x240",
             "titleFooter": "",
-            "action": "panel:/search/0.json"
+            "action": "panel:https://search-zlbh.onrender.com/search/0.json"
         }]
     }
     return jsonify(response)
