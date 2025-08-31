@@ -8,6 +8,10 @@ import threading
 import time
 from playwright.sync_api import sync_playwright
 import re
+import os
+
+# Устанавливаем переменные окружения для Playwright
+os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/ms-playwright'
 
 app = Flask(__name__)
 
@@ -62,11 +66,17 @@ def scrape_movie(url, movie_id):
 
     try:
         with sync_playwright() as p:
-            # Для production (Docker) используем headless=True  
-            # Для локальной разработки можно поставить headless=False
+            # Настройки для работы в Docker/Render
             browser = p.chromium.launch(
                 headless=True,
-                args=['--no-sandbox', '--disable-dev-shm-usage']
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--disable-extensions'
+                ]
             )
             page = browser.new_page()
 
