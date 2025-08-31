@@ -68,7 +68,7 @@ def input_handler():
                 "title": title,
                 "image": poster,
                 "titleFooter": footer,
-                "action": f"panel:/search/{idx}.json"   # теперь ссылка на наш сервер
+                "action": f"panel:https://search-zlbh.onrender.com/search/{idx}.json"   # теперь ссылка на наш сервер
             })
     except Exception as e:
         logger.error(f"Ошибка при поиске: {e}")
