@@ -88,7 +88,7 @@ def input_handler():
             "title": f["title"],
             "image": f["image"],
             "titleFooter": f["titleFooter"],
-            "action": f"panel:/search/{f['id']}.json"
+            "action": f"panel:https://search-zlbh.onrender.com/search/{f['id']}.json"
         })
 
     response = {
