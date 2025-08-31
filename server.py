@@ -80,7 +80,6 @@ def input_handler():
             "type": "separate",
             "layout": "0,0,2,4",
             "color": "msx-glass",
-            "icon": "msx-white-soft:movie",
             "iconSize": "medium",
             "title": input_text,
             "image": films[0]["image"] if films else "https://via.placeholder.com/160x240"
@@ -142,7 +141,6 @@ def search_film_details(item_id):
                         "layout": "0,0,8,6",
                         "headline": title,
                         "text": description,
-                        "icon": "msx-white-soft:apps",
                         "titleHeader": f"Жанры: {', '.join(genres) if genres else 'не указаны'}",
                         "title": f"Рейтинг: {rating}",
                         "titleFooter": f"{year}",
