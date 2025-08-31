@@ -24,13 +24,11 @@ def input_handler():
     if not input_text:
         return jsonify({"error": "Нет параметра input"}), 400
 
-    # Поиск фильмов
     domain = get_domain()
     search_url = f"{domain}/search?query={input_text}"
     headers = {"User-Agent": "Mozilla/5.0"}
 
     films = []
-    posters = []
     try:
         resp = requests.get(search_url, headers=headers, timeout=10)
         resp.raise_for_status()
@@ -39,33 +37,42 @@ def input_handler():
         for item in soup.select("ul.items.with_spacer li.item"):
             a_tag = item.select_one(".title a")
             poster_img = item.select_one(".poster img")
+            year_el = item.select_one(".year")
+            quality_el = item.select_one(".quality, .q")  # иногда класс меняется
 
             if not a_tag:
                 continue
 
             title = a_tag.get_text(strip=True)
-            poster = urljoin(domain, poster_img['src']) if poster_img and poster_img.has_attr('src') else "https://via.placeholder.com/160x240"
+            poster = urljoin(domain, poster_img["src"]) if poster_img and poster_img.has_attr("src") else "https://via.placeholder.com/160x240"
+            year = year_el.get_text(strip=True) if year_el else ""
+            quality = quality_el.get_text(strip=True) if quality_el else ""
 
-            films.append(title)
-            posters.append(poster)
+            films.append({
+                "title": title,
+                "image": poster,
+                "titleFooter": f"{year}, {quality}" if year or quality else ""
+            })
     except Exception as e:
         logger.error(f"Ошибка при поиске: {e}")
 
-    # Формируем ответ
     response = {
         "type": "list",
-        "headline": input_text,   # <-- Template={INPUT}
+        "headline": input_text,   # заголовок = ввод
         "template": {
             "type": "separate",
             "layout": "0,0,2,4",
             "color": "msx-glass",
             "icon": "msx-white-soft:movie",
             "iconSize": "medium",
-            "title": input_text,       # заголовок карточки = input
-            "image": posters[0] if posters else "https://via.placeholder.com/160x240"  # <-- вместо titleFooter
+            "title": input_text,
+            "image": films[0]["image"] if films else "https://via.placeholder.com/160x240"
         },
-        "items": [{"title": films[i], "image": posters[i]} for i in range(len(films))] \
-                 or [{"title": "Ничего не найдено", "image": "https://via.placeholder.com/160x240"}]
+        "items": films or [{
+            "title": "Ничего не найдено",
+            "image": "https://via.placeholder.com/160x240",
+            "titleFooter": ""
+        }]
     }
     return jsonify(response)
 
