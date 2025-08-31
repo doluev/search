@@ -4,6 +4,10 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import urljoin
+import threading
+import time
+from playwright.sync_api import sync_playwright
+import re
 
 app = Flask(__name__)
 
@@ -14,16 +18,118 @@ logger = logging.getLogger(__name__)
 # Кэш поиска (id -> ссылка на фильм)
 search_cache = {}
 
+# Кэш парсинга (id -> статус и данные)
+parsing_cache = {}
+
 def get_domain():
     today = datetime.today()
     date_str = today.strftime("%d%m%y")
     return f"https://kinovod{date_str}.pro"
 
+def clean_title(title):
+    if not title:
+        return ""
+    title = re.sub(r'\s+', ' ', title.strip())
+    title = re.sub(r'[^\w\s\-\.а-яёА-ЯЁ]', '', title)
+    return title.strip()
+
+def get_element_text(element):
+    try:
+        return element.inner_text().strip()
+    except:
+        try:
+            return element.text_content().strip()
+        except:
+            return ""
+
+def click_element(page, element):
+    try:
+        handle = element.element_handle()
+        if handle:
+            page.evaluate("(el) => el.scrollIntoView({behavior: 'smooth', block: 'center'})", handle)
+            page.wait_for_timeout(80)
+            page.evaluate("(el) => el.click()", handle)
+    except Exception as e:
+        logger.error(f"Ошибка при клике: {e}")
+
+def scrape_movie(url, movie_id):
+    """Парсинг фильма с сохранением результата в кэш"""
+    logger.info(f"[PARSING] Начат парсинг фильма {movie_id}: {url}")
+    parsing_cache[movie_id] = {"status": "parsing", "data": None}
+    
+    m3u8_requests = []
+    title = "Фильм"
+
+    try:
+        with sync_playwright() as p:
+            # Для production (Docker) используем headless=True  
+            # Для локальной разработки можно поставить headless=False
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage']
+            )
+            page = browser.new_page()
+
+            # Перехват сетевых запросов
+            def handle_request(request):
+                if ".m3u8" in request.url:
+                    logger.info(f"[MOVIE-ANY] {request.url}")
+                    if re.search(r'(master.*\.m3u8$|index.*\.m3u8$)', request.url):
+                        logger.info(f"[MOVIE] Найдено по сети: {request.url}")
+                        m3u8_requests.append(request.url)
+
+            page.on("request", handle_request)
+
+            page.goto(url, timeout=60000)
+            page.wait_for_load_state("networkidle")
+
+            # Проверка DOM <video src>
+            video_tags = page.query_selector_all("video[src]")
+            for tag in video_tags:
+                src = tag.get_attribute("src")
+                if src and ".m3u8" in src:
+                    logger.info(f"[MOVIE-DOM] Найден src в <video>: {src}")
+                    m3u8_requests.append(src)
+
+            # Немного ждём, чтобы успели прилететь запросы
+            time.sleep(0.8)
+            page.wait_for_timeout(200)
+
+            title = clean_title(page.title() or "Фильм")
+            browser.close()
+
+        # Удаляем дубликаты
+        unique_links = list(dict.fromkeys(m3u8_requests))
+        
+        if unique_links:
+            parsing_cache[movie_id] = {
+                "status": "completed", 
+                "data": {
+                    "title": title,
+                    "links": unique_links
+                }
+            }
+            logger.info(f"[PARSING] Парсинг {movie_id} завершен успешно: {len(unique_links)} ссылок")
+        else:
+            parsing_cache[movie_id] = {"status": "failed", "data": None}
+            logger.warning(f"[PARSING] Парсинг {movie_id} завершен, но ссылки не найдены")
+            
+    except Exception as e:
+        logger.error(f"[PARSING] Ошибка парсинга {movie_id}: {e}")
+        parsing_cache[movie_id] = {"status": "failed", "data": None}
+
+def start_async_parsing(url, movie_id):
+    """Запуск парсинга в отдельном потоке"""
+    thread = threading.Thread(target=scrape_movie, args=(url, movie_id))
+    thread.daemon = True
+    thread.start()
+
 # --- /input: поиск фильмов ---
 @app.route("/input", methods=["GET", "POST"])
 def input_handler():
-    global search_cache
+    global search_cache, parsing_cache
     search_cache.clear()
+    parsing_cache.clear()
 
     input_text = request.args.get("input", "") or request.form.get("input", "")
     logger.info(f"[INPUT] Получен ввод: {input_text}")
@@ -111,12 +217,17 @@ def input_handler():
     }
     return jsonify(response)
 
-# --- /search/<id>.json: данные о фильме ---
+# --- /search/<id>.json: данные о фильме + запуск парсинга ---
 @app.route("/search/<int:item_id>.json")
 def search_film_details(item_id):
     link = search_cache.get(item_id)
     if not link:
         return jsonify({"error": "Фильм не найден"}), 404
+
+    # Запускаем асинхронный парсинг
+    if item_id not in parsing_cache:
+        logger.info(f"[ASYNC] Запуск парсинга для фильма {item_id}")
+        start_async_parsing(link, item_id)
 
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -136,8 +247,11 @@ def search_film_details(item_id):
     alt_title_el = soup.select_one('.info_item .value[itemprop="alternativeHeadline"]')
     alt_title = alt_title_el.get_text(strip=True) if alt_title_el else title
 
-    # --- страна ---
+    # --- страна, год, жанры ---
     country = ""
+    year = ""
+    genres = []
+    
     for info in soup.select("div.info_item"):
         key = info.select_one(".key")
         val = info.select_one(".value")
@@ -151,9 +265,6 @@ def search_film_details(item_id):
         elif key_text == "жанр":
             genres = [g.get_text(strip=True) for g in val.select('[itemprop="genre"]')]
 
-    # если год не найден в блоке, fallback
-    year = locals().get("year", "")
-
     # --- постер ---
     poster = soup.select_one(".poster img")
     poster = urljoin(link, poster["src"]) if poster and poster.has_attr("src") else "https://via.placeholder.com/160x240"
@@ -166,13 +277,13 @@ def search_film_details(item_id):
     description = soup.select_one('div.body[itemprop="description"]')
     description = description.get_text(strip=True) if description else "Описание отсутствует"
 
-    # JSON в формате pages
+    # JSON в формате pages с новым action
     response = {
         "type": "pages",
         "headline": title,
         "pages": [
             {
-                "headline": ", ".join([x for x in [alt_title, country, year] if x]),  # orig + страна + год
+                "headline": ", ".join([x for x in [alt_title, country, year] if x]),
                 "items": [
                     {
                         "type": "default",
@@ -185,13 +296,132 @@ def search_film_details(item_id):
                         "image": poster,
                         "imageFiller": "cover",
                         "imageWidth": 4,
-                        "action": "video:http://msx.benzac.de/media/video1.mp4"
+                        "action": f"panel:https://search-zlbh.onrender.com/video.json?id={item_id}"
                     }
                 ]
             }
         ]
     }
     return jsonify(response)
+
+# --- /video.json: отдаём ссылки на видео ---
+@app.route("/video.json")
+def video_handler():
+    item_id = request.args.get("id", type=int)
+    if not item_id:
+        return jsonify({"error": "Не указан параметр id"}), 400
+
+    # Проверяем статус парсинга
+    parse_status = parsing_cache.get(item_id)
+    if not parse_status:
+        logger.warning(f"[VIDEO] Парсинг для {item_id} не найден")
+        return jsonify({"error": "Парсинг не найден"}), 404
+
+    if parse_status["status"] == "parsing":
+        logger.info(f"[VIDEO] Парсинг {item_id} ещё в процессе")
+        return jsonify({"error": "Парсинг в процессе"}), 202  # Accepted, но не готово
+
+    if parse_status["status"] == "failed":
+        logger.warning(f"[VIDEO] Парсинг {item_id} завершился с ошибкой")
+        return jsonify({"error": "Парсинг завершился с ошибкой"}), 500
+
+    if parse_status["status"] == "completed":
+        data = parse_status["data"]
+        if not data or not data.get("links"):
+            return jsonify({"error": "Видео не найдено"}), 404
+
+        # Формируем ответ
+        items = []
+        for i, video_url in enumerate(data["links"], 1):
+            items.append({
+                "title": f"Качество {i}",
+                "playerLabel": f"{data['title']} - Качество {i}",
+                "action": f"video:{video_url}"
+            })
+
+        response = {
+            "type": "pages",
+            "headline": "Videos",
+            "template": {
+                "tag": "Web",
+                "type": "separate", 
+                "layout": "0,0,2,4",
+                "icon": "msx-white-soft:movie",
+                "color": "msx-glass"
+            },
+            "items": items
+        }
+        
+        logger.info(f"[VIDEO] Отдаём {len(items)} видео для {item_id}")
+        return jsonify(response)
+
+    return jsonify({"error": "Неизвестный статус парсинга"}), 500
+
+def scrape_movie_async(url, movie_id):
+    """Асинхронный парсинг фильма"""
+    logger.info(f"[ASYNC-PARSING] Начат парсинг фильма {movie_id}: {url}")
+    parsing_cache[movie_id] = {"status": "parsing", "data": None}
+    
+    m3u8_requests = []
+    title = "Фильм"
+
+    try:
+        with sync_playwright() as p:
+            # Для production (Docker) используем headless=True
+            # Для локальной разработки можно поставить headless=False
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage']
+            )
+            page = browser.new_page()
+
+            # Перехват сетевых запросов
+            def handle_request(request):
+                if ".m3u8" in request.url:
+                    logger.info(f"[MOVIE-ANY] {request.url}")
+                    if re.search(r'(master.*\.m3u8$|index.*\.m3u8$)', request.url):
+                        logger.info(f"[MOVIE] Найдено по сети: {request.url}")
+                        m3u8_requests.append(request.url)
+
+            page.on("request", handle_request)
+
+            page.goto(url, timeout=60000)
+            page.wait_for_load_state("networkidle")
+
+            # Проверка DOM <video src>
+            video_tags = page.query_selector_all("video[src]")
+            for tag in video_tags:
+                src = tag.get_attribute("src")
+                if src and ".m3u8" in src:
+                    logger.info(f"[MOVIE-DOM] Найден src в <video>: {src}")
+                    m3u8_requests.append(src)
+
+            # Немного ждём, чтобы успели прилететь запросы
+            time.sleep(0.8)
+            page.wait_for_timeout(200)
+
+            title = clean_title(page.title() or "Фильм")
+            browser.close()
+
+        # Удаляем дубликаты
+        unique_links = list(dict.fromkeys(m3u8_requests))
+        
+        if unique_links:
+            parsing_cache[movie_id] = {
+                "status": "completed", 
+                "data": {
+                    "title": title,
+                    "links": unique_links
+                }
+            }
+            logger.info(f"[ASYNC-PARSING] Парсинг {movie_id} завершен успешно: {len(unique_links)} ссылок")
+        else:
+            parsing_cache[movie_id] = {"status": "failed", "data": None}
+            logger.warning(f"[ASYNC-PARSING] Парсинг {movie_id} завершен, но ссылки не найдены")
+            
+    except Exception as e:
+        logger.error(f"[ASYNC-PARSING] Ошибка парсинга {movie_id}: {e}")
+        parsing_cache[movie_id] = {"status": "failed", "data": None}
 
 @app.after_request
 def after_request(response):
