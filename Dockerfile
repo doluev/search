@@ -1,23 +1,29 @@
 # Базовый образ с Python
 FROM python:3.12-slim
 
-# Устанавливаем системные зависимости для Chromium
+# Обновляем систему и устанавливаем необходимые пакеты
 RUN apt-get update && apt-get install -y \
     wget \
+    curl \
     gnupg \
     ca-certificates \
-    libnss3 \
-    libatk1.0-0 \
+    fonts-liberation \
+    libasound2 \
     libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libatspi2.0-0 \
     libdrm2 \
-    libxkbcommon0 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
     libxcomposite1 \
     libxdamage1 \
+    libxfixes3 \
+    libxkbcommon0 \
     libxrandr2 \
-    libgbm1 \
     libxss1 \
-    libasound2 \
-    libxshmfence1 \
+    libgbm1 \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # Рабочая папка
@@ -27,19 +33,20 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Устанавливаем Playwright и браузеры
+# Устанавливаем Playwright
 RUN pip install --no-cache-dir playwright
-RUN playwright install chromium
-RUN playwright install-deps chromium
+
+# Устанавливаем браузеры с полными зависимостями
+RUN playwright install --with-deps chromium
+
+# Проверяем что браузер установлен
+RUN playwright install-deps
 
 # Копируем весь код проекта
 COPY . .
-
-# Устанавливаем переменные окружения для Playwright
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Открываем порт для Render
 EXPOSE 5000
 
 # Запуск через gunicorn
-CMD ["gunicorn", "-b", "0.0.0.0:5000", "server:app"]
+CMD ["gunicorn", "-b", "0.0.0.0:5000", "-w", "1", "--timeout", "120", "server:app"]
