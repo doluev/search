@@ -4,11 +4,6 @@ services:
     env: python
     plan: free
     buildCommand: |
-      pip install -r requirements.txt
+      pip install --no-cache-dir -r requirements.txt
       playwright install chromium
     startCommand: gunicorn server:app --workers=2 --threads=4 --worker-class=gthread --bind 0.0.0.0:$PORT
-    envVars:
-      - key: PYTHONUNBUFFERED
-        value: "1"
-      - key: PORT
-        value: "5000"
