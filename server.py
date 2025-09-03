@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import logging
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urljoin
 import threading
 import time
@@ -16,16 +16,49 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Кэш поиска (id -> ссылка на фильм)
-search_cache = {}
+# Хранилище сессий
+sessions = {}  # session_id -> {"search": {}, "parsing": {}, "last_used": datetime}
 
-# Кэш парсинга (id -> статус и данные)
-parsing_cache = {}
+# Настройки очистки
+SESSION_TIMEOUT = timedelta(hours=1)  # сколько хранить сессии
+CLEANUP_INTERVAL = 600  # как часто чистить (секунд)
+
+
+def get_user_id():
+    """Определяем идентификатор пользователя"""
+    session_id = request.args.get("session") or request.form.get("session")
+    if not session_id:
+        session_id = request.remote_addr
+
+    # если нет сессии — создаем
+    if session_id not in sessions:
+        sessions[session_id] = {
+            "search": {},
+            "parsing": {},
+            "last_used": datetime.now()
+        }
+    else:
+        sessions[session_id]["last_used"] = datetime.now()
+
+    return session_id
+
+
+def cleanup_sessions():
+    """Фоновая очистка старых сессий"""
+    while True:
+        now = datetime.now()
+        expired = [sid for sid, data in sessions.items() if now - data["last_used"] > SESSION_TIMEOUT]
+        for sid in expired:
+            del sessions[sid]
+            logger.info(f"[CLEANUP] Удалена устаревшая сессия: {sid}")
+        time.sleep(CLEANUP_INTERVAL)
+
 
 def get_domain():
     today = datetime.today()
     date_str = today.strftime("%d%m%y")
     return f"https://kinovod{date_str}.pro"
+
 
 def clean_title(title):
     if not title:
@@ -34,11 +67,12 @@ def clean_title(title):
     title = re.sub(r'[^\w\s\-\.а-яёА-ЯЁ]', '', title)
     return title.strip()
 
-def scrape_movie_async(url, movie_id):
+
+def scrape_movie_async(url, session_id, movie_id):
     """Асинхронный парсинг фильма"""
-    logger.info(f"[ASYNC-PARSING] Начат парсинг фильма {movie_id}: {url}")
-    parsing_cache[movie_id] = {"status": "parsing", "data": None}
-    
+    logger.info(f"[ASYNC-PARSING] Начат парсинг фильма {movie_id} ({session_id}): {url}")
+    sessions[session_id]["parsing"][movie_id] = {"status": "parsing", "data": None}
+
     m3u8_requests = []
     title = "Фильм"
 
@@ -54,20 +88,18 @@ def scrape_movie_async(url, movie_id):
             )
             page = browser.new_page()
 
-            # Перехват сетевых запросов
-            def handle_request(request):
-                if ".m3u8" in request.url:
-                    logger.info(f"[MOVIE-ANY] {request.url}")
-                    if re.search(r'(master.*\.m3u8$|index.*\.m3u8$)', request.url):
-                        logger.info(f"[MOVIE] Найдено по сети: {request.url}")
-                        m3u8_requests.append(request.url)
+            def handle_request(request_obj):
+                if ".m3u8" in request_obj.url:
+                    logger.info(f"[MOVIE-ANY] {request_obj.url}")
+                    if re.search(r'(master.*\.m3u8$|index.*\.m3u8$)', request_obj.url):
+                        logger.info(f"[MOVIE] Найдено по сети: {request_obj.url}")
+                        m3u8_requests.append(request_obj.url)
 
             page.on("request", handle_request)
 
             page.goto(url, timeout=60000)
             page.wait_for_load_state("networkidle")
 
-            # Проверка DOM <video src>
             video_tags = page.query_selector_all("video[src]")
             for tag in video_tags:
                 src = tag.get_attribute("src")
@@ -79,33 +111,29 @@ def scrape_movie_async(url, movie_id):
             title = clean_title(page.title() or "Фильм")
             browser.close()
 
-        # Удаляем дубликаты
         unique_links = list(dict.fromkeys(m3u8_requests))
-        
-        if unique_links:
-            parsing_cache[movie_id] = {
-                "status": "completed", 
-                "data": {
-                    "title": title,
-                    "links": unique_links
-                }
-            }
-            logger.info(f"[ASYNC-PARSING] Парсинг {movie_id} завершен успешно: {len(unique_links)} ссылок")
-        else:
-            parsing_cache[movie_id] = {"status": "failed", "data": None}
-            logger.warning(f"[ASYNC-PARSING] Парсинг {movie_id} завершен, но ссылки не найдены")
-            
-    except Exception as e:
-        logger.error(f"[ASYNC-PARSING] Ошибка парсинга {movie_id}: {e}")
-        parsing_cache[movie_id] = {"status": "failed", "data": None}
 
-def start_async_parsing(url, movie_id):
-    """Запуск парсинга в отдельном потоке"""
-    thread = threading.Thread(target=scrape_movie_async, args=(url, movie_id))
+        if unique_links:
+            sessions[session_id]["parsing"][movie_id] = {
+                "status": "completed",
+                "data": {"title": title, "links": unique_links}
+            }
+            logger.info(f"[ASYNC-PARSING] Парсинг {movie_id} ({session_id}) завершен: {len(unique_links)} ссылок")
+        else:
+            sessions[session_id]["parsing"][movie_id] = {"status": "failed", "data": None}
+            logger.warning(f"[ASYNC-PARSING] Парсинг {movie_id} ({session_id}) завершен, но ссылки не найдены")
+
+    except Exception as e:
+        logger.error(f"[ASYNC-PARSING] Ошибка парсинга {movie_id} ({session_id}): {e}")
+        sessions[session_id]["parsing"][movie_id] = {"status": "failed", "data": None}
+
+
+def start_async_parsing(url, session_id, movie_id):
+    thread = threading.Thread(target=scrape_movie_async, args=(url, session_id, movie_id))
     thread.daemon = True
     thread.start()
 
-# --- Root endpoint ---
+
 @app.route("/")
 def root():
     return jsonify({
@@ -114,20 +142,20 @@ def root():
         "endpoints": ["/input", "/search/<id>.json", "/video.json", "/health"]
     }), 200
 
-# --- Health check ---
+
 @app.route("/health")
 def health_check():
     return jsonify({"status": "ok"}), 200
 
-# --- /input: поиск фильмов ---
+
 @app.route("/input", methods=["GET", "POST"])
 def input_handler():
-    global search_cache, parsing_cache
-    search_cache.clear()
-    parsing_cache.clear()
+    session_id = get_user_id()
+    sessions[session_id]["search"].clear()
+    sessions[session_id]["parsing"].clear()
 
     input_text = request.args.get("input", "") or request.form.get("input", "")
-    logger.info(f"[INPUT] Получен ввод: {input_text}")
+    logger.info(f"[INPUT] ({session_id}) Получен ввод: {input_text}")
 
     if not input_text:
         return jsonify({"error": "Нет параметра input"}), 400
@@ -167,7 +195,7 @@ def input_handler():
             footer_parts = [p for p in [year, quality, rating] if p]
             footer = ", ".join(footer_parts)
 
-            search_cache[idx] = link
+            sessions[session_id]["search"][idx] = link
 
             films.append({
                 "id": idx,
@@ -177,24 +205,21 @@ def input_handler():
                 "rating_val": rating_val
             })
     except Exception as e:
-        logger.error(f"Ошибка при поиске: {e}")
+        logger.error(f"Ошибка при поиске ({session_id}): {e}")
 
-    # сортировка по убыванию рейтинга
     films_sorted = sorted(films, key=lambda x: x["rating_val"], reverse=True)
 
-    # Получаем домен Railway из переменной окружения или используем fallback
     base_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:5000")
     if not base_url.startswith("http"):
         base_url = f"https://{base_url}"
 
-    # готовим JSON
     items = []
     for f in films_sorted:
         items.append({
             "title": f["title"],
             "image": f["image"],
             "titleFooter": f["titleFooter"],
-            "action": f"panel:{base_url}/search/{f['id']}.json"
+            "action": f"panel:{base_url}/search/{f['id']}.json?session={session_id}"
         })
 
     response = {
@@ -212,46 +237,42 @@ def input_handler():
             "title": "Ничего не найдено",
             "image": "https://via.placeholder.com/160x240",
             "titleFooter": "",
-            "action": f"panel:{base_url}/search/0.json"
+            "action": f"panel:{base_url}/search/0.json?session={session_id}"
         }]
     }
     return jsonify(response)
 
-# --- /search/<id>.json: данные о фильме + запуск парсинга ---
+
 @app.route("/search/<int:item_id>.json")
 def search_film_details(item_id):
-    link = search_cache.get(item_id)
+    session_id = get_user_id()
+    link = sessions[session_id]["search"].get(item_id)
     if not link:
         return jsonify({"error": "Фильм не найден"}), 404
 
-    # Запускаем асинхронный парсинг
-    if item_id not in parsing_cache:
-        logger.info(f"[ASYNC] Запуск парсинга для фильма {item_id}")
-        start_async_parsing(link, item_id)
+    if item_id not in sessions[session_id]["parsing"]:
+        logger.info(f"[ASYNC] Запуск парсинга для фильма {item_id} ({session_id})")
+        start_async_parsing(link, session_id, item_id)
 
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         resp = requests.get(link, headers=headers, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        logger.error(f"Ошибка загрузки {link}: {e}")
+        logger.error(f"Ошибка загрузки {link} ({session_id}): {e}")
         return jsonify({"error": "Не удалось загрузить страницу"}), 500
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # --- название ---
     title = soup.select_one("h1")
     title = title.get_text(strip=True) if title else "Без названия"
 
-    # --- оригинальное название ---
     alt_title_el = soup.select_one('.info_item .value[itemprop="alternativeHeadline"]')
     alt_title = alt_title_el.get_text(strip=True) if alt_title_el else title
 
-    # --- страна, год, жанры ---
     country = ""
     year = ""
     genres = []
-    
     for info in soup.select("div.info_item"):
         key = info.select_one(".key")
         val = info.select_one(".value")
@@ -265,24 +286,19 @@ def search_film_details(item_id):
         elif key_text == "жанр":
             genres = [g.get_text(strip=True) for g in val.select('[itemprop="genre"]')]
 
-    # --- постер ---
     poster = soup.select_one(".poster img")
     poster = urljoin(link, poster["src"]) if poster and poster.has_attr("src") else "https://via.placeholder.com/160x240"
 
-    # --- рейтинг ---
     rating = soup.select_one(".rating")
     rating = rating.get_text(strip=True) if rating else "0"
 
-    # --- описание ---
     description = soup.select_one('div.body[itemprop="description"]')
     description = description.get_text(strip=True) if description else "Описание отсутствует"
 
-    # Получаем базовый URL
     base_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:5000")
     if not base_url.startswith("http"):
         base_url = f"https://{base_url}"
 
-    # JSON в формате pages с новым action
     response = {
         "type": "pages",
         "headline": title,
@@ -301,7 +317,7 @@ def search_film_details(item_id):
                         "image": poster,
                         "imageFiller": "cover",
                         "imageWidth": 4,
-                        "action": f"panel:{base_url}/video.json?id={item_id}"
+                        "action": f"panel:{base_url}/video.json?id={item_id}&session={session_id}"
                     }
                 ]
             }
@@ -309,25 +325,23 @@ def search_film_details(item_id):
     }
     return jsonify(response)
 
-# --- /video.json: отдаём ссылки на видео ---
+
 @app.route("/video.json")
 def video_handler():
+    session_id = get_user_id()
     item_id = request.args.get("id", type=int)
     if not item_id:
         return jsonify({"error": "Не указан параметр id"}), 400
 
-    # Проверяем статус парсинга
-    parse_status = parsing_cache.get(item_id)
+    parse_status = sessions[session_id]["parsing"].get(item_id)
     if not parse_status:
-        logger.warning(f"[VIDEO] Парсинг для {item_id} не найден")
+        logger.warning(f"[VIDEO] Парсинг для {item_id} ({session_id}) не найден")
         return jsonify({"error": "Парсинг не найден"}), 404
 
     if parse_status["status"] == "parsing":
-        logger.info(f"[VIDEO] Парсинг {item_id} ещё в процессе")
         return jsonify({"error": "Парсинг в процессе"}), 202
 
     if parse_status["status"] == "failed":
-        logger.warning(f"[VIDEO] Парсинг {item_id} завершился с ошибкой")
         return jsonify({"error": "Парсинг завершился с ошибкой"}), 500
 
     if parse_status["status"] == "completed":
@@ -335,7 +349,6 @@ def video_handler():
         if not data or not data.get("links"):
             return jsonify({"error": "Видео не найдено"}), 404
 
-        # Формируем ответ
         items = []
         for i, video_url in enumerate(data["links"], 1):
             items.append({
@@ -349,24 +362,17 @@ def video_handler():
             "headline": "Videos",
             "template": {
                 "tag": "Web",
-                "type": "separate", 
+                "type": "separate",
                 "layout": "0,0,2,4",
                 "icon": "msx-white-soft:movie",
                 "color": "msx-glass"
             },
             "items": items
         }
-        
-        logger.info(f"[VIDEO] Отдаём {len(items)} видео для {item_id}")
         return jsonify(response)
 
     return jsonify({"error": "Неизвестный статус парсинга"}), 500
 
-def start_async_parsing(url, movie_id):
-    """Запуск парсинга в отдельном потоке"""
-    thread = threading.Thread(target=scrape_movie_async, args=(url, movie_id))
-    thread.daemon = True
-    thread.start()
 
 @app.after_request
 def after_request(response):
@@ -375,6 +381,11 @@ def after_request(response):
     response.headers.add("Access-Control-Allow-Methods", "GET,POST")
     return response
 
+
 if __name__ == "__main__":
+    # запускаем фоновую очистку
+    cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
+    cleanup_thread.start()
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
