@@ -183,7 +183,7 @@ def input_handler():
     films_sorted = sorted(films, key=lambda x: x["rating_val"], reverse=True)
 
     # Получаем домен Railway из переменной окружения или используем fallback
-    base_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:5000")
+    base_url = os.environ.get("RENDER_EXTERNAL_URL", "localhost:5000")
     if not base_url.startswith("http"):
         base_url = f"https://{base_url}"
 
@@ -278,7 +278,7 @@ def search_film_details(item_id):
     description = description.get_text(strip=True) if description else "Описание отсутствует"
 
     # Получаем базовый URL
-    base_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost:5000")
+    base_url = os.environ.get("RENDER_EXTERNAL_URL", "localhost:5000")
     if not base_url.startswith("http"):
         base_url = f"https://{base_url}"
 
